@@ -480,7 +480,8 @@ impl ViewImpl for BaseviewView {
         let drop_data = get_drop_data(sender);
 
         let event = MouseEvent::DragEntered {
-            position: get_drag_position(sender).to_physical(this.view.backing_scale_factor()),
+            position: get_drag_position(sender, |p| this.view.convertPoint_fromView(p, None))
+                .to_physical(this.view.backing_scale_factor()),
             modifiers: make_modifiers(modifiers),
             data: drop_data,
         };
@@ -495,7 +496,8 @@ impl ViewImpl for BaseviewView {
         let drop_data = get_drop_data(sender);
 
         let event = MouseEvent::DragMoved {
-            position: get_drag_position(sender).to_physical(this.view.backing_scale_factor()),
+            position: get_drag_position(sender, |p| this.view.convertPoint_fromView(p, None))
+                .to_physical(this.view.backing_scale_factor()),
             modifiers: make_modifiers(modifiers),
             data: drop_data,
         };
@@ -519,7 +521,8 @@ impl ViewImpl for BaseviewView {
         let drop_data = get_drop_data(sender);
 
         let event = MouseEvent::DragDropped {
-            position: get_drag_position(sender).to_physical(this.view.backing_scale_factor()),
+            position: get_drag_position(sender, |p| this.view.convertPoint_fromView(p, None))
+                .to_physical(this.view.backing_scale_factor()),
             modifiers: make_modifiers(modifiers),
             data: drop_data,
         };
@@ -714,9 +717,14 @@ fn new_tracking_area(this: &NSView) -> Retained<NSTrackingArea> {
     }
 }
 
-fn get_drag_position(sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) -> LogicalPosition<f64> {
+/// The drag position in the view's (flipped, top-left based) coordinates. `draggingLocation` is in
+/// window coordinates, which differ from the view's whenever the view is embedded in a host window,
+/// so `to_view` converts it like the mouse events do. (Klopfer patch)
+fn get_drag_position(
+    sender: Option<&ProtocolObject<dyn NSDraggingInfo>>, to_view: impl Fn(NSPoint) -> NSPoint,
+) -> LogicalPosition<f64> {
     let point = match sender {
-        Some(sender) => sender.draggingLocation(),
+        Some(sender) => to_view(sender.draggingLocation()),
         None => NSPoint::ZERO,
     };
 
