@@ -56,6 +56,10 @@ pub(crate) struct EventLoop {
     draw_now: bool,
     last_requested_serial: Option<u32>,
     last_received_present: Option<(u32, u64)>,
+    /// Frames are paced by the fallback timer instead of the Present extension
+    fallback_frames: bool,
+    /// Whether the check for a missing first Present notification is scheduled
+    present_watchdog: bool,
 
     loop_signal: LoopSignal,
     loop_handle: LoopHandle<'static, Self>,
@@ -102,6 +106,8 @@ impl EventLoop {
             draw_now: false,
             last_requested_serial: None,
             last_received_present: None,
+            fallback_frames: false,
+            present_watchdog: false,
             drag_n_drop: DragNDropState::NoCurrentSession,
             xkb_state: XkbcommonState::new(&window.connection),
             run_error: None,
@@ -123,8 +129,13 @@ impl EventLoop {
         Ok(event_received)
     }
 
-    fn setup_fallback_frame_timer(&self) -> Result<(), calloop::Error> {
+    fn setup_fallback_frame_timer(&mut self) -> Result<(), calloop::Error> {
         const FRAME_INTERVAL: Duration = Duration::from_millis(15);
+
+        if self.fallback_frames {
+            return Ok(());
+        }
+        self.fallback_frames = true;
 
         fn handle_frame(evloop: &mut EventLoop, previous_deadline: Instant) -> TimeoutAction {
             evloop.draw_now = true;
@@ -179,6 +190,11 @@ impl EventLoop {
             return Ok(());
         }
 
+        if self.fallback_frames {
+            self.window.present_notify_requested.set(false);
+            return Ok(());
+        }
+
         if !self.window.xcb_window.present_supported() {
             self.window.present_notify_requested.set(false);
             return Ok(());
@@ -204,11 +220,40 @@ impl EventLoop {
 
         if self.window.xcb_window.present_notify(target_msc, next_serial)?.check_is_ok() {
             self.last_requested_serial = Some(next_serial);
+            self.watch_first_present()?;
         } else {
             self.last_requested_serial = None;
             self.setup_fallback_frame_timer()?;
         }
         self.window.present_notify_requested.set(false);
+
+        Ok(())
+    }
+
+    /// Some setups never deliver Present notifications for the window, e.g. windows embedded in
+    /// REAPER under XWayland. The window would then never draw its first frame, so fall back to
+    /// the frame timer if the first notification doesn't arrive in time.
+    fn watch_first_present(&mut self) -> Result<(), calloop::Error> {
+        const TIMEOUT: Duration = Duration::from_millis(250);
+
+        if self.present_watchdog || self.last_received_present.is_some() {
+            return Ok(());
+        }
+        self.present_watchdog = true;
+
+        self.loop_handle
+            .insert_source(Timer::from_duration(TIMEOUT), |_, _, e| {
+                if e.last_received_present.is_none() {
+                    warn!("No Present notification received, falling back to a frame timer");
+                    e.last_requested_serial = None;
+                    if let Err(err) = e.setup_fallback_frame_timer() {
+                        warn!("Failed to set up the fallback frame timer: {}", err);
+                    }
+                    e.draw_now = true;
+                }
+                TimeoutAction::Drop
+            })
+            .map_err(|e| e.error)?;
 
         Ok(())
     }
@@ -472,6 +517,7 @@ impl EventLoop {
             }
 
             XEvent::Expose(e) if e.window == self.window.raw_id() => {
+                self.window.visibility_state.own_window_exposed();
                 self.window.present_notify_requested.set(true)
             }
 

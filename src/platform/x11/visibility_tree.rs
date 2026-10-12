@@ -72,6 +72,12 @@ impl AncestryList {
         self.inner.borrow().iter().all(|a| a.mapped.get())
     }
 
+    pub fn set_all_mapped(&self) {
+        for ancestor in self.inner.borrow().iter() {
+            ancestor.mapped.set(true);
+        }
+    }
+
     pub fn set_mapped(&self, window: NonZeroU32, mapped: bool) -> bool {
         let inner = self.inner.borrow();
         let Some(ancestor) = inner.iter().find(|a| a.id == window) else {
@@ -152,6 +158,19 @@ impl AncestorVisibilityState {
                 }
 
                 all_mapped
+            }
+        }
+    }
+
+    /// Our own window received an Expose event. X only sends those to viewable windows, so the
+    /// window and all its ancestors are mapped, even if a MapNotify for one of them got lost, e.g.
+    /// because the window got mapped between querying its state and selecting its events.
+    pub fn own_window_exposed(&self) {
+        match self {
+            Self::Floating { own_window_viewable, .. } => own_window_viewable.set(true),
+            Self::Parented { own_window_viewable, ancestry, .. } => {
+                ancestry.set_all_mapped();
+                own_window_viewable.set(true);
             }
         }
     }
